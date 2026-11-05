@@ -38,6 +38,7 @@
 #include "input/pen.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 
 #include <fcntl.h>
@@ -311,10 +312,15 @@ handle_relative_motion(void *data, struct zwp_relative_pointer_v1*,
     if (ensure_pipe(display, INPUT_POINTER))
         return;
 
-    acc_x += wl_fixed_to_double(dx);
-    acc_y += wl_fixed_to_double(dy);
+    task::input_mapping mapping;
+    mapping.px_per_logical_x = display->scale;
+    mapping.px_per_logical_y = display->scale;
+    if (display->pointer_surface)
+        display->input_map.find(display->pointer_surface, mapping);
+    acc_x += wl_fixed_to_double(dx) * mapping.px_per_logical_x;
+    acc_y += wl_fixed_to_double(dy) * mapping.px_per_logical_y;
 
-    if (abs(acc_x) < 1 && abs(acc_y) < 1)
+    if (std::abs(acc_x) < 1 && std::abs(acc_y) < 1)
         return;
 
     if (clock_gettime(CLOCK_MONOTONIC, &rt) == -1) {

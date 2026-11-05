@@ -12,18 +12,23 @@ the build needs from Android 13. The result ships as a Waydroid overlay file:
 ndk/build.sh x86_64        # about 2 minutes on a cold cache, 6 s to rebuild
 ```
 
-The output is `~/.cache/crownos-android/hwc/out/x86_64/vendor/lib64/hw/hwcomposer.waydroid.so`.
-Two builds from different cache directories are bit-identical.
+The output is `~/.cache/crownos-android/hwc/out/x86_64/vendor/lib64/hw/hwcomposer.waydroid.so`,
+where the CrownOS setup picks it up. Two builds from different cache directories
+are bit-identical.
 
 Requirements: NDK 27.2.12479018, SDK build-tools 34.0.0 (for `aidl`), cmake ≥ 3.27,
-ninja, clang, bison, flex, OpenSSL, jsoncpp, expat, debugfs and python3. Environment
-overrides: `ANDROID_NDK`, `AIDL`, `HWC_CACHE`, `WAYDROID_IMAGES`, `JOBS` (default 4),
-`HOST_CC` and `HOST_CXX`.
+ninja, clang, bison, flex, OpenSSL, jsoncpp, expat, debugfs, python3 and, for the
+host tests, GoogleTest. Environment overrides: `ANDROID_NDK`, `AIDL`, `HWC_CACHE`,
+`WAYDROID_IMAGES`, `JOBS` (default 4), `HOST_CC`, `HOST_CXX`,
+`CROWNOS_PROTOCOLS` (default `../../crownos-protocols/protocols`, for
+`crownos-android-shell-v1.xml`) and `CROWNOS_CONTRACTS` (default
+`../../crownos-android/contracts`, for `agent-wire-vectors.txt`).
 
 ## What `build.sh` does
 
 | Step | Script | Output in `$HWC_CACHE` |
 |---|---|---|
+| Build and run the host unit tests: the agent-wire codec against the contract's golden vectors, the agent link against a fake agent, task geometry, configure serials, dmabuf format sets, input helpers, and syncobj/vgem fences on the host's DRM nodes (skipped where a node is missing) | `host-test.sh`, `host-tests/` | `build/host-tests/` |
 | Fetch android-13.0.0_r75 / LineageOS 20 sources and apply the Waydroid patches that change headers or generated code | `fetch-sources.sh` | `aosp/` (69 MB) |
 | Extract the HWC's `DT_NEEDED` closure from the images, in vendor linker-namespace order | `make-sysroot.sh` | `sysroot/<abi>/lib64` (55 libraries, 8 MB) |
 | Build the host tools `hidl-gen` (with the Waydroid patch) and `wayland-scanner` (AOSP wayland 1.19) | `host/CMakeLists.txt` | `build/host/` |
@@ -31,7 +36,18 @@ overrides: `ANDROID_NDK`, `AIDL`, `HWC_CACHE`, `WAYDROID_IMAGES`, `JOBS` (defaul
 | Cross-compile libffi, libwayland-client, libxkbcommon, the protocol code, the HWC and, for checking only, the `vendor.waydroid.*` HIDL libraries | `CMakeLists.txt`, `cmake/*.cmake` | `build/<abi>/`, `out/<abi>/` |
 | Resolve every import against the sysroot | `check-symbols.sh` | `*.imports.tsv` next to the .so |
 | Compare the rebuilt HIDL libraries with `vendor.img`: strong exports and every vtable slot | `check-hidl-abi.sh` | |
-| Check the `cros_gralloc_handle` layout against the image's minigbm and the stock HWC (x86_64 only) | `check-gralloc-handle.sh` | `build/gralloc-probe/` |
+| Check the `cros_gralloc_handle` layout against the image's minigbm: every field the HWC reads, the per-plane arrays and plane count included, is proven against the image's allocator (x86_64 only) | `check-gralloc-handle.sh` | `build/gralloc-probe/` |
+
+## Protocols
+
+The protocol XML is newer than AOSP's: wayland 1.24 (`wl_seat` v8 with
+`axis_value120`, `wl_output` v4) and wayland-protocols 1.45 (xdg-shell v6 with
+`suspended`, linux-dmabuf v4 feedback, linux-drm-syncobj, xdg-activation,
+xdg-decoration, pointer gestures, xdg-output), both pinned in `sources.lock`,
+plus `crownos-android-shell-v1.xml` from crownos-protocols. The AOSP 1.19
+`wayland-scanner` generates the code, so it runs on the statically linked
+libwayland-client 1.19 (no `wl_proxy_marshal_flags`). `hwcomposer/Android.bp`
+lists the same sources, but only this build generates the newer protocols.
 
 ## ABI rules this build follows
 
@@ -67,6 +83,10 @@ These were measured against the stock module and against a build of commit
   inlining choices than the platform's clang 14.
 - **No `configureRpcThreadpool` import at HEAD.** This is a source change: upstream
   commit `4aee4c8` dropped the call.
+- **CrownOS changes.** The task-window HWC no longer imports `sw_sync_*` (the
+  CrownOS kernel has no `CONFIG_SW_SYNC`; vgem fences replace it) and adds
+  `sync_merge`, the libc socket, ioctl and directory calls, and the libc++
+  `std::thread` symbols, all resolved against the image by `check-symbols.sh`.
 
 ## arm64
 
