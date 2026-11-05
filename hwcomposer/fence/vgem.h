@@ -17,6 +17,7 @@ namespace fence {
 struct vgem_fence {
     uint32_t id = 0;
     uint32_t slot = 0;
+    uint32_t generation = 0;
 };
 
 /// Sync fences that the HWC signals itself, the replacement for sw_sync
@@ -25,6 +26,10 @@ struct vgem_fence {
 /// fence; buffers return to the pool once their fence signals. vgem signals
 /// a forgotten fence by itself after 10 s, so a lost compositor event can
 /// never wedge SurfaceFlinger.
+///
+/// vgem keeps every fence id of an open file until the file closes, so
+/// fences come from generations: after a while a new file takes over, and
+/// the old one closes once its last fence has signaled.
 class vgem_fences {
   public:
     /// Opens the vgem node; null when vgem is not loaded or not reachable.
@@ -46,13 +51,25 @@ class vgem_fences {
         int dmabuf = -1;
         bool busy = false;
     };
+    struct generation {
+        ~generation();
+        uint32_t number = 0;
+        int fd = -1;
+        std::vector<buffer> buffers;
+        uint64_t fences_made = 0;
+        size_t busy = 0;
 
-    explicit vgem_fences(int fd);
-    bool add_buffer();
+        bool add_buffer();
+    };
 
-    int fd;
+    vgem_fences(std::string path, std::unique_ptr<generation> first);
+    static std::unique_ptr<generation> open_generation(const std::string &path, uint32_t number);
+    generation *current_generation();
+
+    const std::string path;
     std::mutex mutex;
-    std::vector<buffer> buffers;
+    /// The last one makes new fences; older ones only finish theirs.
+    std::vector<std::unique_ptr<generation>> generations;
 };
 
 } // namespace fence

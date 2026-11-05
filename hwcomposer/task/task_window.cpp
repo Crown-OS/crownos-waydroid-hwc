@@ -58,6 +58,8 @@ void handle_toplevel_configure(void *data, xdg_toplevel *toplevel, int32_t width
     window->task->pending_width = width;
     window->task->pending_height = height;
     window->task->pending_suspended = has_state(states, XDG_TOPLEVEL_STATE_SUSPENDED);
+    window->task->pending_exact_size = has_state(states, XDG_TOPLEVEL_STATE_MAXIMIZED) ||
+                                       has_state(states, XDG_TOPLEVEL_STATE_FULLSCREEN);
 }
 
 void handle_toplevel_close(void *data, xdg_toplevel *toplevel) {
@@ -97,24 +99,28 @@ const xdg_toplevel_listener toplevel_listener = {
 
 void handle_surface_configure(void *data, xdg_surface *surface, uint32_t serial) {
     struct display *display = display_of(data);
-    std::scoped_lock lock(display->windowsMutex);
-    window *window = find_task_window(display, surface);
-    if (!window) {
-        return;
-    }
-    xdg_surface_ack_configure(surface, serial);
+    {
+        std::scoped_lock lock(display->windowsMutex);
+        window *window = find_task_window(display, surface);
+        if (!window) {
+            return;
+        }
+        xdg_surface_ack_configure(surface, serial);
 
-    task_window_state &task = *window->task;
-    const auto request = task.sizing.configure(task.pending_width, task.pending_height, serial);
-    if (request) {
-        display->agent_link->send(
-            agent_wire::SetSize{task.task_id, request->width, request->height, request->serial});
+        task_window_state &task = *window->task;
+        const auto request =
+            task.sizing.configure(task.pending_width, task.pending_height, serial, task.pending_exact_size);
+        if (request) {
+            display->agent_link->send(
+                agent_wire::SetSize{task.task_id, request->width, request->height, request->serial});
+        }
+        if (task.pending_suspended != task.suspended) {
+            task.suspended = task.pending_suspended;
+            display->agent_link->send(agent_wire::Visibility{task.task_id, !task.suspended});
+        }
+        window->configured = true;
     }
-    if (task.pending_suspended != task.suspended) {
-        task.suspended = task.pending_suspended;
-        display->agent_link->send(agent_wire::Visibility{task.task_id, !task.suspended});
-    }
-    window->configured = true;
+    // Never with the windows mutex: the adapter holds its own lock across hwc_set
     display->request_frame();
 }
 
@@ -303,6 +309,7 @@ std::unique_ptr<window> window::create_for_task(struct display *display, uint32_
     task_window.viewport = wp_viewporter_get_viewport(display->viewporter, task_window.surface);
     task_window.bg_buffer = transparent_pixel(display);
     task_window.task = std::make_unique<task_window_state>(task_id, facts.package, display->scale);
+    task_window.task->agent_session = display->agent_session;
     task_window_state &task = *task_window.task;
     task.sizing.adopt_slot(slot);
 

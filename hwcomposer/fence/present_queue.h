@@ -5,9 +5,11 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace fence {
@@ -16,43 +18,60 @@ namespace fence {
 /// screen, and SurfaceFlinger (through hwc2on1adapter) reads the fence of
 /// frame N - 1 as the present fence of frame N. So when the compositor
 /// presents (or discards, which also means "superseded") frame N, every
-/// fence of an earlier frame is due.
+/// fence of an earlier frame is due. A fence is also due at its deadline:
+/// a compositor may hold the feedback of a window nobody sees, and
+/// SurfaceFlinger must not wait for it.
 template <class Fence>
 class present_queue {
   public:
-    void add(uint64_t frame, const Fence &fence) {
+    using clock = std::chrono::steady_clock;
+
+    void add(uint64_t frame, const Fence &fence, clock::time_point deadline) {
         std::lock_guard lock(mutex);
-        pending.push_back({frame, fence});
+        pending.push_back({frame, fence, deadline});
     }
 
     /// Fences of frames before `frame`, removed from the queue.
     std::vector<Fence> take_before(uint64_t frame) {
-        std::vector<Fence> due;
-        std::lock_guard lock(mutex);
-        while (!pending.empty() && pending.front().frame < frame) {
-            due.push_back(pending.front().fence);
-            pending.pop_front();
-        }
-        return due;
+        return take_while([frame](const entry &front) { return front.frame < frame; });
+    }
+
+    /// Fences whose deadline has passed at `now`.
+    std::vector<Fence> take_overdue(clock::time_point now) {
+        return take_while([now](const entry &front) { return front.deadline <= now; });
     }
 
     std::vector<Fence> take_all() {
-        std::vector<Fence> due;
+        return take_while([](const entry &) { return true; });
+    }
+
+    std::optional<clock::time_point> next_deadline() const {
         std::lock_guard lock(mutex);
-        for (const auto &entry : pending) {
-            due.push_back(entry.fence);
+        if (pending.empty()) {
+            return std::nullopt;
         }
-        pending.clear();
-        return due;
+        return pending.front().deadline;
     }
 
   private:
     struct entry {
         uint64_t frame;
         Fence fence;
+        clock::time_point deadline;
     };
 
-    std::mutex mutex;
+    template <class Due>
+    std::vector<Fence> take_while(Due due) {
+        std::vector<Fence> taken;
+        std::lock_guard lock(mutex);
+        while (!pending.empty() && due(pending.front())) {
+            taken.push_back(pending.front().fence);
+            pending.pop_front();
+        }
+        return taken;
+    }
+
+    mutable std::mutex mutex;
     std::deque<entry> pending;
 };
 

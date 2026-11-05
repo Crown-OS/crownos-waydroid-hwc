@@ -15,6 +15,7 @@
 #include <log/log.h>
 #include <sync/sync.h>
 
+#include <chrono>
 #include <climits>
 #include <unordered_map>
 
@@ -23,6 +24,10 @@ namespace {
 /// A toast keeps its distance from the bottom of the atlas, but never more
 /// than this fraction of the window height.
 constexpr int32_t toast_gap_window_fraction = 3;
+/// Refresh periods a frame may wait for its presentation feedback before it
+/// counts as presented (the compositor may hold the feedback of a window
+/// nobody sees).
+constexpr int64_t retire_deadline_frames = 3;
 
 void close_fence(int &fd) {
     if (fd >= 0) {
@@ -191,7 +196,8 @@ int task_window_mode::cleanup_stale_windows(waydroid_hwc_composer_device_1 *pdev
     struct display *display = pdev->display;
     display->windows.erase_if([display](const auto &entry) {
         const window &window = *entry.second;
-        return !window.task || !display->tasks.facts(window.task->task_id);
+        return !window.task || window.task->agent_session != display->agent_session ||
+               !display->tasks.facts(window.task->task_id);
     });
     for (auto &[key, window] : display->windows) {
         apply_task_facts(display, *window, *display->tasks.facts(window->task->task_id));
@@ -236,7 +242,7 @@ int task_window_mode::show_layer(waydroid_hwc_composer_device_1 *pdev, window &w
         same_placement(layer.shown_placement, placement) && content_unchanged(*hwc_layer)) {
         close_fence(hwc_layer->acquireFenceFd);
         hwc_layer->releaseFenceFd =
-            layer.sync && display->sync && cached->isDmabuf ? display->sync->release_fence(*layer.sync) : -1;
+            layer.sync && cached->isDmabuf ? display->sync->release_fence(*layer.sync, cached->id) : -1;
         return 0;
     }
 
@@ -262,9 +268,9 @@ int task_window_mode::show_layer(waydroid_hwc_composer_device_1 *pdev, window &w
     return 0;
 }
 
-void task_window_mode::show_framebuffer(waydroid_hwc_composer_device_1 *pdev, uint32_t task_id) {
+void task_window_mode::show_framebuffer(waydroid_hwc_composer_device_1 *pdev, const task::layer_identity &identity) {
     struct display *display = pdev->display;
-    window *window = task_window_of(display, task_id);
+    window *window = window_for_task(pdev, identity);
     if (!framebuffer || !framebuffer->handle || !window || !window->task->ready(*window)) {
         return;
     }
@@ -294,7 +300,7 @@ int task_window_mode::handle_layer(waydroid_hwc_composer_device_1 *pdev, hwc_lay
     const layer_plan &plan = plans[index];
     if (plan.client) {
         if (plan.shows_framebuffer) {
-            show_framebuffer(pdev, plan.identity.task_id);
+            show_framebuffer(pdev, plan.identity);
         }
         close_fence(hwc_layer->acquireFenceFd);
         return 0;
@@ -430,13 +436,14 @@ void task_window_mode::commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_
 }
 
 int task_window_mode::retire_fence(waydroid_hwc_composer_device_1 *pdev, uint64_t frame) {
-    fence::frame_sync *sync = pdev->display->sync.get();
-    if (!sync) {
-        return -1;
-    }
-    const int fence = sync->retire_fence(frame);
+    fence::frame_sync &sync = *pdev->display->sync;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::nanoseconds(int64_t(pdev->vsync_period_ns) * retire_deadline_frames);
+    const int fence = sync.retire_fence(frame, deadline);
     /* A frame that is not timed retires the earlier ones at once; a timed
-     * one waits for its presentation, but never more than one frame. */
-    sync->frame_finished(frame_timed ? frame - 1 : frame);
+     * one waits for its presentation, but never past its deadline. */
+    if (!frame_timed) {
+        sync.frame_finished(frame);
+    }
     return fence;
 }

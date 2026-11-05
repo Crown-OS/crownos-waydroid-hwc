@@ -33,6 +33,8 @@ struct task_window_state {
 
     const uint32_t task_id;
     const std::string package;
+    /// The agent connection the window was opened under.
+    uint32_t agent_session = 0;
     task::window_sizing sizing;
 
     crownos_android_toplevel_v1 *android_toplevel = nullptr;
@@ -46,6 +48,8 @@ struct task_window_state {
     int32_t pending_width = 0;
     int32_t pending_height = 0;
     bool pending_suspended = false;
+    /// Maximized or fullscreen: the configured size must be the geometry.
+    bool pending_exact_size = false;
     /// The compositor does not show the window: nothing is committed to it.
     bool suspended = false;
 

@@ -92,3 +92,16 @@ TEST(Sizing, SlotsTheAgentMovesOnItsOwnResizeTheWindow) {
     sizing.slot_applied(0, {0, 0, 1000, 1000});
     EXPECT_EQ(sizing.size(), (logical_size{500, 500}));
 }
+
+TEST(Sizing, MaximizedWindowsKeepTheConfiguredSize) {
+    window_sizing sizing(1);
+    sizing.adopt_slot({0, 0, 800, 600});
+    ASSERT_TRUE(sizing.configure(1920, 1080, 4, true));
+    sizing.slot_applied(4, {0, 0, 1920, 1200});
+    EXPECT_FALSE(sizing.resize_pending());
+    EXPECT_EQ(sizing.size(), (logical_size{1920, 1080}));
+    EXPECT_DOUBLE_EQ(sizing.layer_scale().y, 0.9);
+    ASSERT_TRUE(sizing.configure(800, 600, 5, false));
+    sizing.slot_applied(5, {0, 0, 800, 600});
+    EXPECT_EQ(sizing.size(), (logical_size{800, 600}));
+}

@@ -387,6 +387,8 @@ struct display {
     std::unique_ptr<agent::link> agent_link;
     /// What the agent said about each task; guarded by windowsMutex.
     task::registry tasks;
+    /// Counts agent connections; windows of an earlier one are stale.
+    uint32_t agent_session;
     /// The task whose window has keyboard focus, 0 for none.
     std::atomic<uint32_t> focused_task;
 

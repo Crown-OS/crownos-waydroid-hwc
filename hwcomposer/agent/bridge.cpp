@@ -24,6 +24,7 @@ void agent_bridge::on_agent_connected() {
     {
         std::scoped_lock lock(display->windowsMutex);
         display->tasks.clear();
+        ++display->agent_session;
     }
     display->request_frame();
 }

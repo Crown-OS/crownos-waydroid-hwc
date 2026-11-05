@@ -198,6 +198,7 @@ keyboard_handle_leave(void *data, struct wl_keyboard *,
                       uint32_t, struct wl_surface *)
 {
     struct display *display = (struct display *)data;
+    display->focused_task = 0;
 
     for (size_t i = 0; i < display->keysDown.size(); i++) {
         if (display->keysDown[i] == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -388,14 +389,15 @@ send_scroll(struct display *display)
     if (ensure_pipe(display, INPUT_POINTER))
         return;
 
-    /* Wayland scrolls down for positive values, Android's wheel up */
-    const int direction = display->reverseScroll ? 1 : -1;
+    /* Wayland scrolls down or right for positive values; evdev's wheel
+     * scrolls up for positive values and its horizontal wheel right */
+    const int direction = display->reverseScroll ? -1 : 1;
     if (clock_gettime(CLOCK_MONOTONIC, &rt) == -1) {
         ALOGE("%s:%d error in scroll clock_gettime: %s",
               __FILE__, __LINE__, strerror(errno));
     }
     if (detents[0]) {
-        ADD_EVENT(EV_REL, REL_WHEEL, direction * detents[0]);
+        ADD_EVENT(EV_REL, REL_WHEEL, -direction * detents[0]);
     }
     if (detents[1]) {
         ADD_EVENT(EV_REL, REL_HWHEEL, direction * detents[1]);
@@ -1256,6 +1258,8 @@ stop_pinch_gestures(struct display *d)
 {
     if (!d->gestures)
         return;
+    if (d->gestures->active)
+        write_pinch_fingers(d, nullptr);
     zwp_pointer_gesture_pinch_v1_destroy(d->gestures->pinch);
     d->gestures.reset();
     if (!d->touch)

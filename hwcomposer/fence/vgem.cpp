@@ -8,6 +8,7 @@
 #include "fence/kernel_uapi.h"
 #include "util/log.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -27,6 +28,8 @@ constexpr uint32_t dumb_width = 1024;
 constexpr uint32_t dumb_bpp = 32;
 /// Fences outstanding at once: frames in flight times layers, with room.
 constexpr size_t max_fence_buffers = 256;
+/// vgem keeps about 10 bytes per fence id ever made on a file.
+constexpr uint64_t fences_per_generation = 1 << 18;
 
 int drm_ioctl(int fd, unsigned long request, void *argument) {
     int result;
@@ -88,7 +91,7 @@ bool allocate_buffer(int vgem_fd, uint32_t &handle, int &dmabuf) {
 
 } // namespace
 
-std::unique_ptr<vgem_fences> vgem_fences::open_path(const std::string &path) {
+std::unique_ptr<vgem_fences::generation> vgem_fences::open_generation(const std::string &path, uint32_t number) {
     const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
     if (fd < 0) {
         return nullptr;
@@ -97,12 +100,22 @@ std::unique_ptr<vgem_fences> vgem_fences::open_path(const std::string &path) {
         close(fd);
         return nullptr;
     }
-    std::unique_ptr<vgem_fences> fences(new vgem_fences(fd));
-    if (!fences->add_buffer()) {
+    auto opened = std::make_unique<generation>();
+    opened->number = number;
+    opened->fd = fd;
+    if (!opened->add_buffer()) {
         CROWN_LOGW("vgem at %s cannot make fence buffers", path.c_str());
         return nullptr;
     }
-    return fences;
+    return opened;
+}
+
+std::unique_ptr<vgem_fences> vgem_fences::open_path(const std::string &path) {
+    auto first = open_generation(path, 1);
+    if (!first) {
+        return nullptr;
+    }
+    return std::unique_ptr<vgem_fences>(new vgem_fences(path, std::move(first)));
 }
 
 std::unique_ptr<vgem_fences> vgem_fences::open() {
@@ -129,9 +142,13 @@ std::unique_ptr<vgem_fences> vgem_fences::open() {
     return nullptr;
 }
 
-vgem_fences::vgem_fences(int fd) : fd(fd) {}
+vgem_fences::vgem_fences(std::string path, std::unique_ptr<generation> first) : path(std::move(path)) {
+    generations.push_back(std::move(first));
+}
 
-vgem_fences::~vgem_fences() {
+vgem_fences::~vgem_fences() = default;
+
+vgem_fences::generation::~generation() {
     for (buffer &entry : buffers) {
         drm_gem_close close_handle{};
         close_handle.handle = entry.handle;
@@ -141,7 +158,7 @@ vgem_fences::~vgem_fences() {
     close(fd);
 }
 
-bool vgem_fences::add_buffer() {
+bool vgem_fences::generation::add_buffer() {
     buffer entry;
     if (!allocate_buffer(fd, entry.handle, entry.dmabuf)) {
         return false;
@@ -150,24 +167,40 @@ bool vgem_fences::add_buffer() {
     return true;
 }
 
+vgem_fences::generation *vgem_fences::current_generation() {
+    generation *current = generations.back().get();
+    if (current->fences_made < fences_per_generation) {
+        return current;
+    }
+    if (auto next = open_generation(path, current->number + 1)) {
+        generations.push_back(std::move(next));
+        if (current->busy == 0) {
+            generations.erase(generations.end() - 2);
+        }
+    }
+    return generations.back().get();
+}
+
 int vgem_fences::create(vgem_fence &fence) {
     std::lock_guard lock(mutex);
+    generation &current = *current_generation();
     size_t slot = 0;
-    while (slot < buffers.size() && buffers[slot].busy) {
+    while (slot < current.buffers.size() && current.buffers[slot].busy) {
         ++slot;
     }
-    if (slot == buffers.size() && (buffers.size() >= max_fence_buffers || !add_buffer())) {
+    if (slot == current.buffers.size() && (current.buffers.size() >= max_fence_buffers || !current.add_buffer())) {
         return -1;
     }
-    buffer &entry = buffers[slot];
+    buffer &entry = current.buffers[slot];
 
     drm_vgem_fence_attach attach{};
     attach.handle = entry.handle;
     attach.flags = VGEM_FENCE_WRITE;
-    if (drm_ioctl(fd, DRM_IOCTL_VGEM_FENCE_ATTACH, &attach) != 0) {
+    if (drm_ioctl(current.fd, DRM_IOCTL_VGEM_FENCE_ATTACH, &attach) != 0) {
         CROWN_LOGE("cannot attach a vgem fence: %s", strerror(errno));
         return -1;
     }
+    ++current.fences_made;
     dma_buf_export_sync_file exported{};
     exported.flags = DMA_BUF_SYNC_READ;
     exported.fd = -1;
@@ -175,23 +208,32 @@ int vgem_fences::create(vgem_fence &fence) {
         CROWN_LOGE("cannot export a vgem fence: %s", strerror(errno));
         drm_vgem_fence_signal signal_now{};
         signal_now.fence = attach.out_fence;
-        drm_ioctl(fd, DRM_IOCTL_VGEM_FENCE_SIGNAL, &signal_now);
+        drm_ioctl(current.fd, DRM_IOCTL_VGEM_FENCE_SIGNAL, &signal_now);
         return -1;
     }
     entry.busy = true;
-    fence = {attach.out_fence, static_cast<uint32_t>(slot)};
+    ++current.busy;
+    fence = {attach.out_fence, static_cast<uint32_t>(slot), current.number};
     return exported.fd;
 }
 
 void vgem_fences::signal(const vgem_fence &fence) {
+    std::lock_guard lock(mutex);
+    const auto owner = std::find_if(generations.begin(), generations.end(),
+                                    [&fence](const auto &candidate) { return candidate->number == fence.generation; });
+    if (owner == generations.end() || fence.slot >= (*owner)->buffers.size()) {
+        return;
+    }
+    generation &made_by = **owner;
     drm_vgem_fence_signal signal_fence{};
     signal_fence.fence = fence.id;
-    if (drm_ioctl(fd, DRM_IOCTL_VGEM_FENCE_SIGNAL, &signal_fence) != 0 && errno != ETIMEDOUT) {
+    if (drm_ioctl(made_by.fd, DRM_IOCTL_VGEM_FENCE_SIGNAL, &signal_fence) != 0 && errno != ETIMEDOUT) {
         CROWN_LOGE("cannot signal vgem fence %u: %s", fence.id, strerror(errno));
     }
-    std::lock_guard lock(mutex);
-    if (fence.slot < buffers.size()) {
-        buffers[fence.slot].busy = false;
+    made_by.buffers[fence.slot].busy = false;
+    --made_by.busy;
+    if (made_by.busy == 0 && owner + 1 != generations.end()) {
+        generations.erase(owner);
     }
 }
 

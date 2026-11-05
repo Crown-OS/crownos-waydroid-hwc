@@ -40,7 +40,7 @@ class task_window_mode : public waydroid_mode {
     void plan_layers(waydroid_hwc_composer_device_1 *pdev, hwc_display_contents_1_t *contents);
     window *window_for_task(waydroid_hwc_composer_device_1 *pdev, const task::layer_identity &identity);
     window *focused_window(waydroid_hwc_composer_device_1 *pdev);
-    void show_framebuffer(waydroid_hwc_composer_device_1 *pdev, uint32_t task_id);
+    void show_framebuffer(waydroid_hwc_composer_device_1 *pdev, const task::layer_identity &identity);
     int show_layer(waydroid_hwc_composer_device_1 *pdev, window &window, hwc_layer_1 *hwc_layer, size_t index,
                    const task::placement &placement, bool accepts_input);
 

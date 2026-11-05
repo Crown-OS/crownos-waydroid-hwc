@@ -30,8 +30,10 @@ class window_sizing {
     /// The first slot known for the task, from the agent or from its layers.
     void adopt_slot(const px_rect &slot);
 
-    /// xdg_toplevel configure. Returns the SetSize to send, if any.
-    std::optional<size_request> configure(int32_t width, int32_t height, uint32_t serial);
+    /// xdg_toplevel configure. Returns the SetSize to send, if any. With
+    /// `exact` (maximized, fullscreen) the window keeps the configured size
+    /// whatever slot the agent applies, stretching it if it must.
+    std::optional<size_request> configure(int32_t width, int32_t height, uint32_t serial, bool exact = false);
 
     /// SlotApplied from the agent.
     void slot_applied(uint32_t serial, const px_rect &slot);
@@ -51,6 +53,7 @@ class window_sizing {
     px_rect current_slot;
     logical_size current_size;
     std::optional<uint32_t> pending_serial;
+    bool exact = false;
 };
 
 } // namespace task

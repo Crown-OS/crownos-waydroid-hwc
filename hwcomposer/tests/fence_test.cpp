@@ -15,6 +15,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 #include <fcntl.h>
@@ -61,13 +63,25 @@ std::unique_ptr<syncobj_device> host_device(std::string &node) {
 
 TEST(PresentQueue, PresentingAFrameRetiresEveryEarlierFrame) {
     present_queue<int> queue;
-    queue.add(1, 10);
-    queue.add(2, 20);
-    queue.add(3, 30);
+    const auto later = present_queue<int>::clock::now() + 1h;
+    queue.add(1, 10, later);
+    queue.add(2, 20, later);
+    queue.add(3, 30, later);
     EXPECT_TRUE(queue.take_before(1).empty());
     EXPECT_EQ(queue.take_before(3), (std::vector<int>{10, 20}));
     EXPECT_TRUE(queue.take_before(3).empty());
     EXPECT_EQ(queue.take_all(), (std::vector<int>{30}));
+}
+
+TEST(PresentQueue, FramesNobodyPresentsRetireAtTheirDeadline) {
+    present_queue<int> queue;
+    const auto now = present_queue<int>::clock::now();
+    queue.add(1, 10, now - 1ms);
+    queue.add(2, 20, now + 50ms);
+    EXPECT_EQ(queue.take_overdue(now), (std::vector<int>{10}));
+    EXPECT_EQ(queue.next_deadline(), now + 50ms);
+    EXPECT_EQ(queue.take_overdue(now + 50ms), (std::vector<int>{20}));
+    EXPECT_FALSE(queue.next_deadline());
 }
 
 TEST(Syncobj, SignaledPointWakesItsEventfd) {
@@ -140,7 +154,7 @@ TEST(Vgem, FencesSignalThroughTheWatcher) {
     const int release = device->point_eventfd(timeline, 1);
     ASSERT_GE(release, 0);
     {
-        point_watcher watcher(*fences);
+        point_watcher watcher(*fences, [] {});
         watcher.watch(release, fence);
         std::this_thread::sleep_for(20ms);
         EXPECT_FALSE(readable(sync_file));
@@ -149,4 +163,22 @@ TEST(Vgem, FencesSignalThroughTheWatcher) {
     }
     close(sync_file);
     device->destroy(timeline);
+}
+
+TEST(Vgem, DeadlinesRunOnTheWatcherThread) {
+    auto fences = vgem_fences::open();
+    if (!fences) {
+        GTEST_SKIP() << "vgem is not loaded";
+    }
+    std::mutex mutex;
+    std::condition_variable ran;
+    bool due = false;
+    point_watcher watcher(*fences, [&] {
+        std::lock_guard lock(mutex);
+        due = true;
+        ran.notify_all();
+    });
+    watcher.schedule(point_watcher::clock::now() + 20ms);
+    std::unique_lock lock(mutex);
+    EXPECT_TRUE(ran.wait_for(lock, 2s, [&] { return due; }));
 }

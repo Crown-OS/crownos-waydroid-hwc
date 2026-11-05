@@ -381,12 +381,11 @@ void commit_with_fences(display *display, surface_context &surface, const buffer
     if (sync && sync->explicit_sync() && buf.isDmabuf) {
         if (!surface.sync)
             surface.sync = sync->sync_surface(surface.surface);
-        if (surface.sync) {
-            surface.sync->set_points(acquire);
+        if (surface.sync && surface.sync->set_points(acquire, buf.id)) {
             if (acquire >= 0)
                 close(acquire);
             wl_surface_commit(surface.surface);
-            hwc_layer->releaseFenceFd = sync->release_fence(*surface.sync);
+            hwc_layer->releaseFenceFd = sync->release_fence(*surface.sync, buf.id);
             return;
         }
     }
@@ -507,6 +506,8 @@ static int hwc_set(struct hwc_composer_device_1* dev,size_t numDisplays,
     std::scoped_lock lock(pdev->display->windowsMutex);
     if (mode->uses_task_windows() != pdev->task_windows_open) {
         clear_open_windows(pdev);
+        if (pdev->task_windows_open)
+            pdev->display->sync->retire_all();
         pdev->task_windows_open = mode->uses_task_windows();
     }
     mode->cleanup_stale_windows(pdev, contents);

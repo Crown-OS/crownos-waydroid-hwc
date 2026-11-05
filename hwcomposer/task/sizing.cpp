@@ -33,10 +33,13 @@ void window_sizing::adopt_slot(const px_rect &slot) {
     }
 }
 
-std::optional<size_request> window_sizing::configure(int32_t width, int32_t height, uint32_t serial) {
+std::optional<size_request> window_sizing::configure(int32_t width, int32_t height, uint32_t serial,
+                                                     bool exact_size) {
     if (width <= 0 || height <= 0) {
+        exact = false;
         return std::nullopt;
     }
+    exact = exact_size;
     const logical_size requested{width, height};
     if (requested == current_size && !pending_serial) {
         return std::nullopt;
@@ -56,7 +59,9 @@ void window_sizing::slot_applied(uint32_t serial, const px_rect &slot) {
         return;
     }
     pending_serial.reset();
-    current_size = size_of(slot);
+    if (!exact) {
+        current_size = size_of(slot);
+    }
 }
 
 window_scale window_sizing::layer_scale() const {
