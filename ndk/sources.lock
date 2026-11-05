@@ -1,0 +1,21 @@
+# Revisions fetch-sources.sh must check out (2026-11-05). Edit together with a re-run of all checks.
+bionic                       998f94cdcddfd9b5134bbdaf4b0752156fd89ab4
+external_libcxx              0eab991b37dfa2342b7f0a1d2307241954dd226f
+external_libcxxabi           9b8c5479211a1a1dc5d35d399f88344fd1f18610
+external_libdrm              6bfcfc725fbe0ece0918535556d61ee567b1ffff
+external_libffi              a8011b453bea48ac68b8c37545b4f04aaf6a9ffc
+external_libxkbcommon        1edee3451aba6b841f02b8074a10c4c98121a02a
+external_minigbm             e5a7769a4892cd1b6c61c56a8bedfc9b93584704
+external_wayland             21f44c8186caa56b3e01a99554f22ab1aa74094d
+external_wayland_protocols   3a0e5d628e797f39e56bebc5554de8fac61f4311
+frameworks_native            915ad642e331e0f8ea107b5f5519f2c6f1e7e01c
+hardware_interfaces          2f83e1bda9536aaf406352c868a8192cc3526a69
+hardware_libhardware         0eb202d7ebd7d2410eb2f62c908c0341964a4829
+system_core                  c0500ffe2cc283d61f1e3db1b2c979bfbd9beb8c
+system_libbase               8436e04cfaa6c21be86b37e9599184d77c67faef
+system_libfmq                ff605a50aac58180f9c3a2268ef999d82abc836c
+system_libhidl               e4f4132ed6926d07d1945495deb732a79950c50a
+system_libhwbinder           bfbbb04c096deccf43ad1c52e80c399a7be985ed
+system_logging               373d54e772f303c441faf2e584a2edf3601b4181
+system_tools_hidl            77f69ca4a1011dd79d9ce3a9637384bb218bc664
+vendor_waydroid              1b95b85221f4faaa357932fa5e93eacb7430f636
