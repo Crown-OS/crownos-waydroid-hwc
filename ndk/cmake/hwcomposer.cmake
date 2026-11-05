@@ -8,6 +8,7 @@ wayland_scan("${HWC_SOURCE_DIR}/wayland-android.xml" code
 wayland_scan("${HWC_SOURCE_DIR}/wayland-android.xml" client-header
     "${HWC_GENERATED_DIR}/wayland-android-client-protocol.h")
 
+include(portable-sources)
 set(HWC_SOURCES
     extension.cpp
     gralloc_handler.cpp
@@ -16,11 +17,19 @@ set(HWC_SOURCES
     WaydroidClipboard.cpp
     WaydroidWindow.cpp
     egl-tools.cpp
+    agent/bridge.cpp
+    dmabuf/feedback_reader.cpp
+    fence/frame_sync.cpp
+    input/wayland_input.cpp
     modes/waydroid_mode.cpp
     modes/closed.cpp
     modes/full-ui.cpp
     modes/multi-window.cpp
-    modes/single-window.cpp)
+    modes/single-window.cpp
+    modes/task-window.cpp
+    output/outputs.cpp
+    task/task_window.cpp
+    ${HWC_PORTABLE_SOURCES})
 list(TRANSFORM HWC_SOURCES PREPEND "${HWC_SOURCE_DIR}/")
 
 add_library(hwcomposer.waydroid SHARED

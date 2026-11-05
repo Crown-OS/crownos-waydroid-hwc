@@ -64,7 +64,7 @@ struct waydroid_hwc_composer_device_1 : hwc_composer_device_1_t {
     pthread_t vsync_thread;          // constant after init
     pthread_t binder_thread;         // constant after init
     pthread_t egl_worker_thread;     // constant after init
-    int32_t vsync_period_ns;         // constant after init
+    std::atomic<int32_t> vsync_period_ns; // follows the presentation feedback in task mode
     struct display *display;         // constant after init
     gralloc_handler gralloc_handler; // constant after init
 
@@ -73,13 +73,26 @@ struct waydroid_hwc_composer_device_1 : hwc_composer_device_1_t {
     std::atomic<bool> vsync_callback_enabled;
     std::atomic<uint64_t> last_vsync_ns;
 
-    int timeline_fd;
-    int next_sync_point;
+    uint64_t frame;
     bool should_compose;
     bool multi_windows;
+    /// The windows open now are task windows (crown-agent connected).
+    bool task_windows_open;
 
     std::unique_ptr<waydroid_mode> selected_mode;
 };
 
 int apply_hwc_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index, window *window);
+
+/// The wl_buffer already made for the layer's handle, without refreshing it.
+buffer *cached_layer_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index);
+/// The wl_buffer for the layer's handle: a dmabuf import when `importable`
+/// has its (format, modifier), else a wl_shm copy. Waits for the acquire
+/// fence (and closes it) only when the CPU has to read the buffer.
+buffer *get_layer_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index,
+                         const dmabuf::format_set &importable);
+/// Commits the attached buffer with the layer's acquire fence (a syncobj
+/// point when the compositor has explicit sync, else a CPU wait) and sets the
+/// layer's release fence. Takes the acquire fence.
+void commit_with_fences(display *display, surface_context &surface, const buffer &buf, hwc_layer_1 *hwc_layer);
 bool is_blacklisted(struct waydroid_hwc_composer_device_1* pdev, const std::string &app_id, const std::string &component);

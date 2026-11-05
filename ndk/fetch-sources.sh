@@ -2,15 +2,16 @@
 # Fetches the Android 13 (LineageOS 20, android-13.0.0_r75) sources whose headers
 # and host tools the out-of-tree HWC build needs, then applies the Waydroid patches
 # that change headers or generated code. Each source lands in its own directory
-# under $S2_CACHE/aosp, at the revision sources.lock pins. Safe to re-run.
+# under $HWC_CACHE/aosp, at the revision sources.lock pins. Safe to re-run.
 set -euo pipefail
 
-S2_CACHE=${S2_CACHE:-$HOME/.cache/crownos-android/s2}
-AOSP_DIR=$S2_CACHE/aosp
+HWC_CACHE=${HWC_CACHE:-$HOME/.cache/crownos-android/hwc}
+AOSP_DIR=$HWC_CACHE/aosp
 AOSP_TAG=android-13.0.0_r75
 LINEAGE_BRANCH=lineage-20.0
 GOOGLESOURCE=https://android.googlesource.com
 GITHUB=https://github.com
+FREEDESKTOP=https://gitlab.freedesktop.org
 LOCK_FILE=$(cd "$(dirname "$0")" && pwd)/sources.lock
 
 mkdir -p "$AOSP_DIR"
@@ -38,8 +39,8 @@ verify_locked_revision() {
     local name=$1 locked actual
     locked=$(awk -v n="$name" '$1 == n {print $2}' "$LOCK_FILE")
     actual=$(git -C "$AOSP_DIR/$name" rev-parse HEAD)
-    if [[ -n $locked && $locked != "$actual" && -z ${S2_ALLOW_SOURCE_DRIFT:-} ]]; then
-        echo "$name is at $actual, sources.lock pins $locked (set S2_ALLOW_SOURCE_DRIFT=1 to accept)" >&2
+    if [[ -n $locked && $locked != "$actual" && -z ${HWC_ALLOW_SOURCE_DRIFT:-} ]]; then
+        echo "$name is at $actual, sources.lock pins $locked (set HWC_ALLOW_SOURCE_DRIFT=1 to accept)" >&2
         exit 1
     fi
 }
@@ -81,6 +82,11 @@ fetch external_libffi  $GOOGLESOURCE/platform/external/libffi $AOSP_TAG
 fetch external_libxkbcommon $GOOGLESOURCE/platform/external/libxkbcommon $AOSP_TAG
 fetch external_libdrm  $GITHUB/waydroid/android_external_libdrm.git lineage-18.1 include android
 fetch external_minigbm $GITHUB/waydroid/android_external_minigbm.git lineage-18.1 cros_gralloc
+# Newer protocol XML than AOSP's: xdg-shell v6, wl_seat v8, wl_output v4,
+# linux-dmabuf v4 feedback, linux-drm-syncobj and xdg-activation. The AOSP
+# 1.19 scanner generates code that the static libwayland-client 1.19 runs.
+fetch upstream_wayland $FREEDESKTOP/wayland/wayland.git 1.24.0 protocol
+fetch upstream_wayland_protocols $FREEDESKTOP/wayland/wayland-protocols.git 1.45
 
 WAYDROID_PATCHES=$AOSP_DIR/vendor_waydroid/waydroid-patches/base-patches-33
 apply_patches system_libhidl "$WAYDROID_PATCHES"/system/libhidl/*.patch

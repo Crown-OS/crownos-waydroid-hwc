@@ -25,6 +25,8 @@
 
 #include "gralloc_handler.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -46,22 +48,13 @@
 #include "wayland-hwc.h"
 
 namespace {
+    /// Pixels reach the shm buffer as 32-bit BGRA (EGL readback) or swizzled
+    /// RGBA/RGBX, so only alpha decides the format.
     uint32_t ConvertHalFormatToShm(uint32_t hal_format) {
-        uint32_t fmt;
-
-        switch (hal_format) {
-            case HAL_PIXEL_FORMAT_RGBX_8888:
-                fmt = WL_SHM_FORMAT_XRGB8888;
-                break;
-            case HAL_PIXEL_FORMAT_RGBA_8888:
-                fmt = WL_SHM_FORMAT_ARGB8888;
-                break;
-            default:
-                ALOGE("Cannot convert hal format to shm format %u", hal_format);
-                return -EINVAL;
-        }
-        return fmt;
+        return hal_format == HAL_PIXEL_FORMAT_RGBX_8888 ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888;
     }
+
+    std::atomic<uint64_t> next_buffer_id{1};
 
     const wl_buffer_listener buffer_listener {
         [](void *, struct wl_buffer *) {}
@@ -74,6 +67,7 @@ std::unique_ptr<buffer> create_shm_wl_buffer(display *display, const buffer_meta
     int shm_stride = metadata.width * 4;
     int size = shm_stride * metadata.height;
 
+    buf->id = next_buffer_id++;
     buf->metadata = metadata;
     buf->handle = handle;
 
@@ -81,7 +75,6 @@ std::unique_ptr<buffer> create_shm_wl_buffer(display *display, const buffer_meta
     buf->size = size;
 
     auto shm_format = ConvertHalFormatToShm(metadata.format);
-    assert(shm_format >= 0);
 
     int fd = syscall(SYS_memfd_create, "buffer", MFD_ALLOW_SEALING);
     ftruncate(fd, size);
@@ -101,10 +94,12 @@ std::unique_ptr<buffer> create_shm_wl_buffer(display *display, const buffer_meta
 }
 
 namespace {
-    //TODO: Implement failure handling for dmabuf
+    /* Only advertised (format, modifier) pairs are imported, so a failure
+     * here means the compositor broke its own feedback; the wl_buffer is
+     * unusable and the connection is about to die anyway. */
     void create_failed(void *data __unused, zwp_linux_buffer_params_v1 *params __unused)
     {
-        ALOGE("%s: zwp_linux_buffer_params.create_immed failed.", __func__);
+        ALOGE("%s: zwp_linux_buffer_params.create_immed failed for an advertised format.", __func__);
         abort();
     }
 
@@ -114,7 +109,7 @@ namespace {
     };
 
     bool isFormatSupported(struct display *display, uint32_t format) {
-        return display->formats.count(format) == 1;
+        return display->importable_formats()->has_format(format);
     }
 
     uint32_t ConvertHalFormatToDrm(struct display *display, uint32_t hal_format) {
@@ -163,15 +158,17 @@ namespace {
     }
 }
 std::unique_ptr<buffer> create_dmabuf_wl_buffer(display *display, const buffer_metadata& metadata,
-                                                                int prime_fd, int drm_format, int byte_stride,
-                                                                int offset, uint64_t modifier, buffer_handle_t handle)
+                                                const dmabuf_plane *planes, size_t plane_count, int drm_format,
+                                                uint64_t modifier, buffer_handle_t handle)
 {
-    assert(prime_fd >= 0);
+    assert(plane_count > 0);
 
     std::unique_ptr<buffer> buf { new buffer() };
 
+    buf->id = next_buffer_id++;
     buf->metadata = metadata;
     buf->handle = handle;
+    buf->isDmabuf = true;
 
     if (drm_format < 0) {
         drm_format = ConvertHalFormatToDrm(display, metadata.format);
@@ -179,7 +176,10 @@ std::unique_ptr<buffer> create_dmabuf_wl_buffer(display *display, const buffer_m
     assert(drm_format >= 0);
 
     zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params(display->dmabuf);
-    zwp_linux_buffer_params_v1_add(params, prime_fd, 0, offset, byte_stride, modifier >> 32, modifier & 0xffffffff);
+    for (size_t plane = 0; plane < plane_count; ++plane) {
+        zwp_linux_buffer_params_v1_add(params, planes[plane].fd, plane, planes[plane].offset, planes[plane].stride,
+                                       modifier >> 32, modifier & 0xffffffff);
+    }
     zwp_linux_buffer_params_v1_add_listener(params, &params_listener, nullptr);
 
     buf->wl_buffer = zwp_linux_buffer_params_v1_create_immed(params, buf->metadata.width, buf->metadata.height, drm_format, 0);
@@ -193,6 +193,7 @@ std::unique_ptr<buffer> create_android_wl_buffer(display *display, const buffer_
 {
     std::unique_ptr<buffer> buf { new buffer() };
 
+    buf->id = next_buffer_id++;
     buf->metadata = metadata;
     buf->handle = handle;
 
@@ -261,14 +262,71 @@ std::unique_ptr<buffer> create_buffer_generic(display *display, const buffer_met
 }
 std::unique_ptr<buffer> create_buffer_gbm(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
     auto *drm_handle = reinterpret_cast<const gralloc_handle_t *>(handle);
-    return create_dmabuf_wl_buffer(display, metadata, drm_handle->prime_fd, -1 /* compute drm format */, drm_handle->stride, 0 /* offset */, drm_handle->modifier, handle);
+    const dmabuf_plane plane{drm_handle->prime_fd, 0, drm_handle->stride};
+    return create_dmabuf_wl_buffer(display, metadata, &plane, 1, -1 /* compute drm format */,
+                                   drm_handle->modifier, handle);
 }
 std::unique_ptr<buffer> create_buffer_cros(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
     auto *cros_handle = reinterpret_cast<const cros_gralloc_handle *>(handle);
-    return create_dmabuf_wl_buffer(display, metadata, cros_handle->fds[0], cros_handle->format, cros_handle->strides[0], cros_handle->offsets[0], cros_handle->format_modifier, handle);
+    const uint32_t plane_count = std::clamp<uint32_t>(cros_handle->num_planes, 1, DRV_MAX_PLANES);
+    dmabuf_plane planes[DRV_MAX_PLANES];
+    for (uint32_t plane = 0; plane < plane_count; ++plane) {
+        planes[plane] = {cros_handle->fds[plane], cros_handle->offsets[plane], cros_handle->strides[plane]};
+    }
+    return create_dmabuf_wl_buffer(display, metadata, planes, plane_count, cros_handle->format,
+                                   cros_handle->format_modifier, handle);
 }
 std::unique_ptr<buffer> create_buffer_android(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
     return create_android_wl_buffer(display, metadata, handle);
+}
+
+bool importable_gbm(display *display, const buffer_metadata &metadata, buffer_handle_t handle,
+                    const dmabuf::format_set &formats) {
+    auto *drm_handle = reinterpret_cast<const gralloc_handle_t *>(handle);
+    const uint32_t drm_format = ConvertHalFormatToDrm(display, metadata.format);
+    return drm_format != static_cast<uint32_t>(-EINVAL) && formats.contains(drm_format, drm_handle->modifier);
+}
+bool importable_cros(display *, const buffer_metadata &, buffer_handle_t handle, const dmabuf::format_set &formats) {
+    auto *cros_handle = reinterpret_cast<const cros_gralloc_handle *>(handle);
+    return formats.contains(cros_handle->format, cros_handle->format_modifier);
+}
+bool importable_always(display *, const buffer_metadata &, buffer_handle_t, const dmabuf::format_set &) {
+    return true;
+}
+
+bool is_yuv_hal_format(uint32_t hal_format) {
+    switch (hal_format) {
+        case HAL_PIXEL_FORMAT_YV12:
+        case HAL_PIXEL_FORMAT_YCBCR_420_888:
+        case HAL_PIXEL_FORMAT_YCBCR_422_SP:
+        case HAL_PIXEL_FORMAT_YCRCB_420_SP:
+        case HAL_PIXEL_FORMAT_YCBCR_422_I:
+        case HAL_PIXEL_FORMAT_YCBCR_P010:
+            return true;
+        default:
+            return false;
+    }
+}
+bool is_yuv_generic(display *display, hwc_layer_1_t *layer, size_t pos) {
+    return is_yuv_hal_format(get_buffer_metadata_generic(display, layer, pos).format);
+}
+bool is_yuv_gbm(display *, hwc_layer_1_t *layer, size_t) {
+    return is_yuv_hal_format(reinterpret_cast<const gralloc_handle_t *>(layer->handle)->format);
+}
+bool is_yuv_cros(display *, hwc_layer_1_t *layer, size_t) {
+    switch (reinterpret_cast<const cros_gralloc_handle *>(layer->handle)->format) {
+        case DRM_FORMAT_NV12:
+        case DRM_FORMAT_NV21:
+        case DRM_FORMAT_NV16:
+        case DRM_FORMAT_NV61:
+        case DRM_FORMAT_YUV420:
+        case DRM_FORMAT_YVU420:
+        case DRM_FORMAT_YUYV:
+        case DRM_FORMAT_P010:
+            return true;
+        default:
+            return false;
+    }
 }
 
 void update_shm_buffer_generic(display *display, buffer *buffer) {
@@ -326,6 +384,27 @@ gralloc_handler::create_buffer_func gralloc_handler::select_create_buffer_impl(d
     }
 }
 
+gralloc_handler::importable_func gralloc_handler::select_importable_impl(display *display, GrallocType gralloc_type) {
+    if (gralloc_type == GrallocType::GRALLOC_GBM && display->dmabuf) {
+        return importable_gbm;
+    } else if (gralloc_type == GrallocType::GRALLOC_CROS && display->dmabuf) {
+        return importable_cros;
+    } else {
+        return importable_always;
+    }
+}
+
+gralloc_handler::is_yuv_func gralloc_handler::select_is_yuv_impl(GrallocType gralloc_type) {
+    switch (gralloc_type) {
+        case GrallocType::GRALLOC_GBM:
+            return is_yuv_gbm;
+        case GrallocType::GRALLOC_CROS:
+            return is_yuv_cros;
+        default:
+            return is_yuv_generic;
+    }
+}
+
 gralloc_handler::update_shm_buffer_func gralloc_handler::select_update_shm_buffer_impl(GrallocType gralloc_type) {
     if (gralloc_type == GrallocType::GRALLOC_DEFAULT) {
         return update_shm_buffer_default;
@@ -337,4 +416,6 @@ gralloc_handler::update_shm_buffer_func gralloc_handler::select_update_shm_buffe
 gralloc_handler::gralloc_handler(display *display)
     : get_buffer_metadata_impl(select_get_buffer_metadata_impl(display->gtype))
     , create_buffer_impl(select_create_buffer_impl(display, display->gtype))
-    , update_shm_buffer_impl(select_update_shm_buffer_impl(display->gtype)) { }
+    , update_shm_buffer_impl(select_update_shm_buffer_impl(display->gtype))
+    , importable_impl(select_importable_impl(display, display->gtype))
+    , is_yuv_impl(select_is_yuv_impl(display->gtype)) { }

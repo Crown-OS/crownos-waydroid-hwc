@@ -39,7 +39,14 @@ class format_set {
     std::vector<format_modifier> pairs;
 };
 
-/// Builds a format_set from zwp_linux_dmabuf_feedback_v1 events: the format
+/// One complete linux-dmabuf feedback.
+struct feedback {
+    format_set formats;
+    /// Every pair once, in the compositor's order of preference.
+    std::vector<format_modifier> preference;
+};
+
+/// Builds a feedback from zwp_linux_dmabuf_feedback_v1 events: the format
 /// table maps tranche indices to pairs, every tranche adds its pairs, and
 /// `done` hands out the result.
 class feedback_collector {
@@ -48,11 +55,11 @@ class feedback_collector {
     /// u64 modifier.
     void set_table(const uint8_t *table, size_t size);
     void add_tranche_indices(const uint16_t *indices, size_t count);
-    format_set done();
+    feedback done();
 
   private:
     std::vector<format_modifier> table;
-    format_set collected;
+    feedback collected;
 };
 
 } // namespace dmabuf

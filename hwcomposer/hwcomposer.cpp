@@ -34,7 +34,6 @@
 #include <log/log.h>
 #include <cutils/properties.h>
 #include <hardware/hwcomposer.h>
-#include <libsync/sw_sync.h>
 #include <sync/sync.h>
 #include <drm_fourcc.h>
 #include <presentation-time-client-protocol.h>
@@ -52,10 +51,13 @@
 #include "egl-tools.h"
 #include "extension.h"
 
+#include "agent/link.h"
+#include "fence/frame_sync.h"
 #include "modes/closed.h"
 #include "modes/full-ui.h"
 #include "modes/multi-window.h"
 #include "modes/single-window.h"
+#include "modes/task-window.h"
 
 using ::android::hardware::joinRpcThreadpool;
 
@@ -70,6 +72,8 @@ using ::android::OK;
 using ::android::status_t;
 
 #define WINDOW_DECORATION_OUTSET 15
+
+constexpr int acquireWarningMS = 100;
 
 namespace {
     hwc_frect_t rect_apply_transform(hwc_frect_t src, uint32_t transform) {
@@ -100,34 +104,22 @@ namespace {
         return nullptr;
     }
 
+    void wait_for_acquire_fence(hwc_layer_1_t *layer) {
+        if (layer->acquireFenceFd < 0)
+            return;
+        if (sync_wait(layer->acquireFenceFd, acquireWarningMS) < 0 && errno == ETIME)
+            ALOGE("hwcomposer waited on fence %d for %d ms", layer->acquireFenceFd, acquireWarningMS);
+        close(layer->acquireFenceFd);
+        layer->acquireFenceFd = -1;
+    }
+
     buffer *get_wl_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1_t *layer, size_t pos) {
-        if (!layer->handle) {
-            ALOGE("cannot create a wayland buffer for a null handle");
-            return nullptr;
-        }
+        return get_layer_buffer(pdev, layer, pos, *pdev->display->importable_formats());
+    }
 
-        const auto& gralloc_handler = pdev->gralloc_handler;
-        auto metadata = gralloc_handler.get_buffer_metadata(pdev->display, layer, pos);
-        buffer *buf = find_cached_buffer(pdev, metadata, layer->handle);
-
-        if (!buf) {
-            std::unique_ptr<buffer> result;
-            if (layer->flags & HWC_IS_CURSOR_LAYER)
-                result = pdev->display->cursor_handler->create_buffer(pdev, metadata, layer);
-            else
-                result = gralloc_handler.create_buffer(pdev->display, metadata, layer->handle);
-            if (!result) {
-                ALOGE("failed to create a wayland buffer");
-                return nullptr;
-            }
-            auto emplace_result = pdev->display->buffer_map.emplace(layer->handle, std::move(result));
-            assert(emplace_result.second);
-            buf = emplace_result.first->second.get();
-        }
-
-        if (buf->isShm)
-            gralloc_handler.update_shm_buffer(pdev->display, buf);
-        return buf;
+    bool task_windows_available(waydroid_hwc_composer_device_1 *pdev) {
+        const struct display *display = pdev->display;
+        return display->agent_link->connected() && display->wm_base && display->viewporter && display->subcompositor;
     }
 
     std::string property_get_string(const char *key, const char *default_value) {
@@ -177,6 +169,8 @@ namespace {
             } else {
                 mode = new non_compositing_single_window_mode();
             }
+        } else if (task_windows_available(pdev)) {
+            mode = new task_window_mode();
         } else {
             assert(pdev->should_compose);
             mode = new multi_window_mode();
@@ -337,20 +331,87 @@ static void apply_surface_damage(hwc_layer_1 *hwc_layer, surface_context &surfac
     });
 }
 
-static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index, surface_context &surface_context, buffer *buf = nullptr) {
-    constexpr int acquireWarningMS = 100;
-    int res = -1;
+buffer *cached_layer_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *layer, size_t pos) {
+    if (!layer->handle)
+        return nullptr;
+    return find_cached_buffer(pdev, pdev->gralloc_handler.get_buffer_metadata(pdev->display, layer, pos), layer->handle);
+}
 
+buffer *get_layer_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *layer, size_t pos,
+                         const dmabuf::format_set &importable) {
+    if (!layer->handle) {
+        ALOGE("cannot create a wayland buffer for a null handle");
+        return nullptr;
+    }
+
+    const auto& gralloc_handler = pdev->gralloc_handler;
+    auto metadata = gralloc_handler.get_buffer_metadata(pdev->display, layer, pos);
+    buffer *buf = find_cached_buffer(pdev, metadata, layer->handle);
+
+    if (!buf) {
+        std::unique_ptr<buffer> result;
+        if (layer->flags & HWC_IS_CURSOR_LAYER)
+            result = pdev->display->cursor_handler->create_buffer(pdev, metadata, layer);
+        else if (gralloc_handler.importable(pdev->display, metadata, layer->handle, importable))
+            result = gralloc_handler.create_buffer(pdev->display, metadata, layer->handle);
+        else
+            result = create_shm_wl_buffer(pdev->display, metadata, layer->handle);
+        if (!result) {
+            ALOGE("failed to create a wayland buffer");
+            return nullptr;
+        }
+        auto emplace_result = pdev->display->buffer_map.emplace(layer->handle, std::move(result));
+        assert(emplace_result.second);
+        buf = emplace_result.first->second.get();
+    }
+
+    if (buf->isShm) {
+        wait_for_acquire_fence(layer);
+        gralloc_handler.update_shm_buffer(pdev->display, buf);
+    }
+    return buf;
+}
+
+void commit_with_fences(display *display, surface_context &surface, const buffer &buf, hwc_layer_1 *hwc_layer) {
+    int acquire = hwc_layer->acquireFenceFd;
+    hwc_layer->acquireFenceFd = -1;
+    hwc_layer->releaseFenceFd = -1;
+
+    fence::frame_sync *sync = display->sync.get();
+    if (sync && sync->explicit_sync() && buf.isDmabuf) {
+        if (!surface.sync)
+            surface.sync = sync->sync_surface(surface.surface);
+        if (surface.sync) {
+            surface.sync->set_points(acquire);
+            if (acquire >= 0)
+                close(acquire);
+            wl_surface_commit(surface.surface);
+            hwc_layer->releaseFenceFd = sync->release_fence(*surface.sync);
+            return;
+        }
+    }
+
+    surface.sync.reset();
+    if (acquire >= 0) {
+        if (sync_wait(acquire, acquireWarningMS) < 0 && errno == ETIME)
+            ALOGE("hwcomposer waited on fence %d for %d ms", acquire, acquireWarningMS);
+        close(acquire);
+    }
+    wl_surface_commit(surface.surface);
+}
+
+static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index, surface_context &surface_context, buffer *buf = nullptr) {
     if (!buf) {
         buf = get_wl_buffer(pdev, hwc_layer, hwc_layer_index);
         if (!buf) {
             ALOGE("Failed to get wayland buffer");
-            goto out;
+            if (hwc_layer->acquireFenceFd != -1) {
+                close(hwc_layer->acquireFenceFd);
+                hwc_layer->acquireFenceFd = -1;
+            }
+            return -1;
         }
     }
-
-    // TODO: Implement per-hwc_layer explicit synchronization
-    hwc_layer->releaseFenceFd = -1;
 
     surface_context.attach_buffer(*buf);
     apply_surface_damage(hwc_layer, surface_context);
@@ -363,24 +424,8 @@ static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pd
         surface_context.set_buffer_scale(pdev->display->scale);
     }
 
-    // TODO: Implement explicit synchronization
-    if (hwc_layer->acquireFenceFd != -1) {
-        res = sync_wait(hwc_layer->acquireFenceFd, acquireWarningMS);
-        if (res < 0 && errno == ETIME) {
-            ALOGE("hwcomposer waited on fence %d for %d ms", hwc_layer->acquireFenceFd,
-                  acquireWarningMS);
-        }
-    } else {
-        res = 0;
-    }
-
-    wl_surface_commit(surface_context.surface);
-
-out:
-    if (hwc_layer->acquireFenceFd != -1) {
-        close(hwc_layer->acquireFenceFd);
-    }
-    return res;
+    commit_with_fences(pdev->display, surface_context, *buf, hwc_layer);
+    return 0;
 }
 
 int apply_hwc_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index, window *window) {
@@ -389,6 +434,7 @@ int apply_hwc_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
         ALOGE("Failed to get wayland buffer");
         if (hwc_layer->acquireFenceFd != -1) {
             close(hwc_layer->acquireFenceFd);
+            hwc_layer->acquireFenceFd = -1;
         }
         return -1;
     }
@@ -412,9 +458,14 @@ int apply_hwc_layer_to_window(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 
                       2*WINDOW_DECORATION_OUTSET + ceil((hwc_layer->displayFrame.bottom - hwc_layer->displayFrame.top) / pdev->display->scale));
     }
 
-    pdev->display->layers[window_layer.surface] = {
-            .x = hwc_layer->displayFrame.left,
-            .y = hwc_layer->displayFrame.top };
+    task::input_mapping input;
+    input.origin_x = hwc_layer->displayFrame.left;
+    input.origin_y = hwc_layer->displayFrame.top;
+    input.px_per_logical_x = pdev->display->scale;
+    input.px_per_logical_y = pdev->display->scale;
+    input.bounds = {hwc_layer->displayFrame.left, hwc_layer->displayFrame.top,
+                    hwc_layer->displayFrame.right, hwc_layer->displayFrame.bottom};
+    pdev->display->input_map.set(window_layer.surface, input);
 
     if (window->display->presentation) {
         auto feedback = wp_presentation_feedback(window->display->presentation, window_layer.surface);
@@ -445,14 +496,19 @@ static int hwc_set(struct hwc_composer_device_1* dev,size_t numDisplays,
     hwc_display_contents_1_t* contents = displays[HWC_DISPLAY_PRIMARY];
     assert(contents);
 
-    if (pdev->should_compose && contents->flags & HWC_GEOMETRY_CHANGED) {
+    const uint64_t frame = ++pdev->frame;
+    auto& mode = pdev->selected_mode;
+    if ((pdev->should_compose || mode->uses_task_windows()) && contents->flags & HWC_GEOMETRY_CHANGED) {
         pdev->display->buffer_map.clear();
     }
 
-    auto& mode = pdev->selected_mode;
     mode->setup_set(pdev, contents);
 
     std::scoped_lock lock(pdev->display->windowsMutex);
+    if (mode->uses_task_windows() != pdev->task_windows_open) {
+        clear_open_windows(pdev);
+        pdev->task_windows_open = mode->uses_task_windows();
+    }
     mode->cleanup_stale_windows(pdev, contents);
 
     reset_per_commit_state_window(pdev);
@@ -472,17 +528,10 @@ static int hwc_set(struct hwc_composer_device_1* dev,size_t numDisplays,
     }
 
     mode->post_processing(pdev, contents);
-
-    for (auto& [key, window] : pdev->display->windows) {
-        if (window->input_region) {
-            wl_surface_set_input_region(window->surface, window->input_region);
-        }
-        wl_surface_commit(window->surface);
-    }
+    mode->commit_windows(pdev, contents);
     wl_display_flush(pdev->display->display);
 
-    sw_sync_timeline_inc(pdev->timeline_fd, 1);
-    contents->retireFenceFd = sw_sync_fence_create(pdev->timeline_fd, "hwc_contents_release", ++pdev->next_sync_point);
+    contents->retireFenceFd = mode->retire_fence(pdev, frame);
 
     if (pdev->display->needHotplug && pdev->procs && pdev->procs->hotplug) {
         pdev->procs->hotplug(pdev->procs, 0, 1);
@@ -563,22 +612,23 @@ static int hwc_get_display_configs(struct hwc_composer_device_1* dev __unused,
 static int32_t hwc_attribute(struct waydroid_hwc_composer_device_1* pdev,
                              const uint32_t attribute) {
     char property[PROPERTY_VALUE_MAX];
-    int width = floor(pdev->display->width * pdev->display->scale);
-    int height = floor(pdev->display->height * pdev->display->scale);
+    const struct display *display = pdev->display;
+    int width = display->fixed_atlas ? display->atlas_width : int(floor(display->width * display->scale));
+    int height = display->fixed_atlas ? display->atlas_height : int(floor(display->height * display->scale));
     int density = 180;
 
     switch(attribute) {
         case HWC_DISPLAY_VSYNC_PERIOD:
             return pdev->vsync_period_ns;
         case HWC_DISPLAY_WIDTH: {
-            if (property_get("persist.waydroid.width_padding", property, nullptr) > 0)
+            if (!display->fixed_atlas && property_get("persist.waydroid.width_padding", property, nullptr) > 0)
                 width -= atoi(property);
             std::string width_str = std::to_string(width);
             property_set("waydroid.display_width", width_str.c_str());
             return width;
         }
         case HWC_DISPLAY_HEIGHT: {
-            if (property_get("persist.waydroid.height_padding", property, nullptr) > 0)
+            if (!display->fixed_atlas && property_get("persist.waydroid.height_padding", property, nullptr) > 0)
                 height -= atoi(property);
             std::string height_str = std::to_string(height);
             property_set("waydroid.display_height", height_str.c_str());
@@ -733,9 +783,6 @@ static int hwc_open(const struct hw_module_t* module, const char* name,
 
     pdev->vsync_period_ns = 1000*1000*1000/60; // vsync is 60 hz
 
-    pdev->timeline_fd = sw_sync_timeline_create();
-    pdev->next_sync_point = 1;
-
     pdev->blacklisted_apps["com.android.launcher3"] = {};
     pdev->blacklisted_apps["com.android.settings"] = {"com.android.settings.FallbackHome"};
     pdev->blacklisted_apps["com.android.tv.settings"] = {"com.android.tv.settings.system.FallbackHome"};
@@ -776,18 +823,21 @@ static int hwc_open(const struct hw_module_t* module, const char* name,
         pdev->should_compose = false;
     }
 
-    if (!property_get_bool("persist.waydroid.cursor_on_subsurface", false)) {
+    if (pdev->display->fixed_atlas || !property_get_bool("persist.waydroid.cursor_on_subsurface", false)) {
         pdev->display->cursor_handler.reset(new wl_cursor_cursor_handler(pdev));
     } else {
         pdev->display->cursor_handler.reset(new subsurface_cursor_handler());
     }
 
-    auto first_window = window::create(pdev->display, pdev->should_compose, "Waydroid", "0", {0, 0, 0, 255});
-    if (!property_get_bool("waydroid.background_start", true)) {
-        pdev->display->windows.add("Waydroid", std::move(first_window));
-        property_set("waydroid.active_apps", "Waydroid");
-    } else {
-        first_window.reset();
+    /* Without a fixed atlas the first window calibrates the display size and
+     * scale; with one, create_display took the scale from the outputs. */
+    const bool background_start = property_get_bool("waydroid.background_start", true);
+    if (!background_start || !pdev->display->fixed_atlas) {
+        auto first_window = window::create(pdev->display, pdev->should_compose, "Waydroid", "0", {0, 0, 0, 255});
+        if (!background_start) {
+            pdev->display->windows.add("Waydroid", std::move(first_window));
+            property_set("waydroid.active_apps", "Waydroid");
+        }
     }
 
     pdev->vsync_callback_enabled = true;
@@ -819,12 +869,16 @@ static int hwc_open(const struct hw_module_t* module, const char* name,
         ALOGE("waydroid_hw_composer could not start egl_worker_thread");
     }
 
+    start_task_windows(pdev->display);
+
     *device = &pdev->common;
 
     return ret;
 }
 
 std::unique_ptr<buffer> cursor_handler::create_buffer(waydroid_hwc_composer_device_1 *pdev, const buffer_metadata& metadata, hwc_layer_1 *hwc_layer) {
+    if (!pdev->gralloc_handler.importable(pdev->display, metadata, hwc_layer->handle, *pdev->display->importable_formats()))
+        return create_shm_wl_buffer(pdev->display, metadata, hwc_layer->handle);
     return pdev->gralloc_handler.create_buffer(pdev->display, metadata, hwc_layer->handle);
 };
 

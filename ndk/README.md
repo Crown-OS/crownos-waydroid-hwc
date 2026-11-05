@@ -12,17 +12,17 @@ the build needs from Android 13. The result ships as a Waydroid overlay file:
 ndk/build.sh x86_64        # about 2 minutes on a cold cache, 6 s to rebuild
 ```
 
-The output is `~/.cache/crownos-android/s2/out/x86_64/vendor/lib64/hw/hwcomposer.waydroid.so`.
+The output is `~/.cache/crownos-android/hwc/out/x86_64/vendor/lib64/hw/hwcomposer.waydroid.so`.
 Two builds from different cache directories are bit-identical.
 
 Requirements: NDK 27.2.12479018, SDK build-tools 34.0.0 (for `aidl`), cmake ≥ 3.27,
 ninja, clang, bison, flex, OpenSSL, jsoncpp, expat, debugfs and python3. Environment
-overrides: `ANDROID_NDK`, `AIDL`, `S2_CACHE`, `WAYDROID_IMAGES`, `JOBS` (default 4),
+overrides: `ANDROID_NDK`, `AIDL`, `HWC_CACHE`, `WAYDROID_IMAGES`, `JOBS` (default 4),
 `HOST_CC` and `HOST_CXX`.
 
 ## What `build.sh` does
 
-| Step | Script | Output in `$S2_CACHE` |
+| Step | Script | Output in `$HWC_CACHE` |
 |---|---|---|
 | Fetch android-13.0.0_r75 / LineageOS 20 sources and apply the Waydroid patches that change headers or generated code | `fetch-sources.sh` | `aosp/` (69 MB) |
 | Extract the HWC's `DT_NEEDED` closure from the images, in vendor linker-namespace order | `make-sysroot.sh` | `sysroot/<abi>/lib64` (55 libraries, 8 MB) |

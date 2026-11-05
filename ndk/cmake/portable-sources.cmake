@@ -13,4 +13,5 @@ set(HWC_PORTABLE_SOURCES
     output/scale.cpp
     task/geometry.cpp
     task/layer_role.cpp
+    task/registry.cpp
     task/sizing.cpp)

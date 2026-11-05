@@ -27,6 +27,15 @@
 
 #include <cutils/properties.h>
 
+void waydroid_mode::commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_display_contents_1_t *) {
+    for (auto& [key, window] : pdev->display->windows) {
+        if (window->input_region) {
+            wl_surface_set_input_region(window->surface, window->input_region);
+        }
+        wl_surface_commit(window->surface);
+    }
+}
+
 void clear_open_windows(waydroid_hwc_composer_device_1 *pdev) {
     pdev->display->windows.clear();
     pdev->display->ignored_apps.clear();

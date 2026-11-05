@@ -52,8 +52,12 @@ TEST(FormatSet, FeedbackTranchesPickPairsFromTheTable) {
     const uint16_t render[] = {0, 2, 9};
     collector.add_tranche_indices(scanout, 1);
     collector.add_tranche_indices(render, 3);
-    const format_set formats = collector.done();
+    const feedback result = collector.done();
+    const format_set &formats = result.formats;
     EXPECT_EQ(formats.entries().size(), 3u);
+    ASSERT_EQ(result.preference.size(), 3u);
+    EXPECT_EQ(result.preference[0], (format_modifier{argb8888, nvidia_block_linear}));
+    EXPECT_EQ(result.preference[1], (format_modifier{argb8888, linear}));
     EXPECT_TRUE(formats.contains(argb8888, nvidia_block_linear));
     EXPECT_TRUE(formats.contains(xrgb8888, linear));
     EXPECT_FALSE(formats.contains(nv12, linear));
@@ -65,10 +69,10 @@ TEST(FormatSet, EachFeedbackStartsEmptyButKeepsTheTable) {
     collector.set_table(table.data(), table.size());
     const uint16_t first[] = {0};
     collector.add_tranche_indices(first, 1);
-    EXPECT_TRUE(collector.done().contains(argb8888, linear));
+    EXPECT_TRUE(collector.done().formats.contains(argb8888, linear));
     const uint16_t second[] = {1};
     collector.add_tranche_indices(second, 1);
-    const format_set formats = collector.done();
+    const format_set formats = collector.done().formats;
     EXPECT_FALSE(formats.contains(argb8888, linear));
     EXPECT_TRUE(formats.contains(nv12, linear));
 }

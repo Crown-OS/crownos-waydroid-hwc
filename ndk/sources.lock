@@ -19,3 +19,5 @@ system_libhwbinder           bfbbb04c096deccf43ad1c52e80c399a7be985ed
 system_logging               373d54e772f303c441faf2e584a2edf3601b4181
 system_tools_hidl            77f69ca4a1011dd79d9ce3a9637384bb218bc664
 vendor_waydroid              1b95b85221f4faaa357932fa5e93eacb7430f636
+upstream_wayland             736d12ac67c20c60dc406dc49bb06be878501f86
+upstream_wayland_protocols   0091197f5c1b1f2c131f1410e99f9c95d50646be

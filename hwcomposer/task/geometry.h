@@ -82,6 +82,8 @@ struct input_mapping {
     double origin_y = 0;
     double px_per_logical_x = 1;
     double px_per_logical_y = 1;
+    /// The Android rectangle the surface shows; empty when unknown.
+    px_rect bounds;
 
     void to_android(double local_x, double local_y, int32_t &android_x, int32_t &android_y) const;
 };

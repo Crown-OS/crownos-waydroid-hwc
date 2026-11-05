@@ -47,6 +47,12 @@ struct waydroid_mode {
                                       hwc_display_contents_1_t* contents) = 0;
     virtual int handle_layer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index) = 0;
     virtual int post_processing(waydroid_hwc_composer_device_1 *, hwc_display_contents_1_t *) { return 0; }
+    // Commits the windows' root surfaces, which applies their layers
+    virtual void commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_display_contents_1_t *contents);
+    // The frame's retire fence: -1 means "already retired"
+    virtual int retire_fence(waydroid_hwc_composer_device_1 *, uint64_t) { return -1; }
+    // Task windows and stock windows never coexist
+    virtual bool uses_task_windows() const { return false; }
 };
 
 

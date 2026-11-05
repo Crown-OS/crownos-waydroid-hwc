@@ -57,9 +57,25 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
+
+#include "agent/bridge.h"
+#include "agent/link.h"
+#include "dmabuf/feedback_reader.h"
+#include "dmabuf/format_set.h"
+#include "fence/frame_sync.h"
+#include "input/pointer_gestures.h"
+#include "input/scroll.h"
+#include "input/surface_input_map.h"
+#include "output/outputs.h"
+#include "task/geometry.h"
+#include "task/registry.h"
 
 using ::android::sp;
 using ::vendor::waydroid::task::V1_0::IWaydroidTask;
@@ -88,10 +104,7 @@ enum class GrallocType {
 
 #define MAX_TOUCHPOINTS 10
 
-struct layerFrame {
-    int x;
-    int y;
-};
+struct task_window_state;
 
 struct handleExt {
     uint32_t format;
@@ -122,12 +135,16 @@ constexpr bool operator!=(const buffer_metadata &lhs, const buffer_metadata &rhs
 }
 
 struct buffer {
+    /// Unique for the life of the HWC, unlike the object's address.
+    uint64_t id;
     struct wl_buffer *wl_buffer;
 
     buffer_handle_t handle;
     buffer_metadata metadata;
 
     bool isShm;
+    /// A linux-dmabuf buffer, the only kind wp_linux_drm_syncobj accepts.
+    bool isDmabuf;
     void *shm_data;
     int size;
 
@@ -150,6 +167,8 @@ BufferTransform hwc_transform_to_buffer_transform(uint32_t hwc_transform);
 struct surface_context {
     struct wl_surface *surface;
     struct wp_viewport *viewport;
+    /// Explicit sync for dmabuf commits, created on the first one.
+    std::unique_ptr<fence::surface_sync> sync;
 
     surface_context() = default;
     surface_context(wl_surface *surface, wp_viewport *viewport);
@@ -172,6 +191,13 @@ struct window {
     struct layer : public surface_context {
         struct wl_subsurface *subsurface;
         struct zwp_locked_pointer_v1 *locked_pointer {};
+
+        /// Task windows: whether the surface takes input (the input method
+        /// and toasts do, task layers leave it to the window), and what it
+        /// showed last, so an unchanged layer is not committed again.
+        bool accepts_input = true;
+        uint64_t shown_buffer = 0;
+        task::placement shown_placement;
 
         layer() = default;
         layer(wl_surface *surface, wp_viewport *viewport, wl_subsurface *subsurface = nullptr);
@@ -207,6 +233,9 @@ struct window {
 
     std::atomic<bool> configured;
 
+    /// Set for CrownOS task windows, which follow the agent's task slots.
+    std::unique_ptr<task_window_state> task;
+
     // Reset every hwc_set cycle
     struct wl_region* input_region;
     int lastLayer;
@@ -215,6 +244,9 @@ struct window {
     ~window();
 
     static std::unique_ptr<window> create(struct display *display, bool use_subsurfaces, std::string appID, std::string taskID, hwc_color_t color);
+    /// A CrownOS task window; see task/task_window.h.
+    static std::unique_ptr<window> create_for_task(struct display *display, uint32_t task_id,
+                                                   const task::task_facts &facts, const task::px_rect &slot);
 
     window::layer &get_next_layer();
     window::layer &create_new_layer();
@@ -313,6 +345,8 @@ struct display {
     struct wl_keyboard *keyboard;
     struct wl_touch *touch;
     struct wl_output *output;
+    std::unique_ptr<output_registry> outputs;
+    struct zxdg_output_manager_v1 *xdg_output_manager;
     struct wp_presentation *presentation;
     struct wp_viewporter *viewporter;
     struct android_wlegl *android_wlegl;
@@ -327,6 +361,34 @@ struct display {
     struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
     struct wl_data_device_manager *data_device_manager;
     struct wl_data_device *data_device;
+    struct zxdg_decoration_manager_v1 *decoration_manager;
+    struct xdg_activation_v1 *activation;
+    struct wp_linux_drm_syncobj_manager_v1 *syncobj_manager;
+    struct crownos_android_shell_manager_v1 *android_shell;
+    struct zwp_pointer_gestures_v1 *pointer_gestures_manager;
+    std::unique_ptr<pointer_gestures> gestures;
+    std::unique_ptr<dmabuf::feedback_reader> default_feedback;
+    /// linux-dmabuf v3 modifier events, for compositors without feedback.
+    dmabuf::feedback legacy_formats;
+    uint32_t wm_base_version;
+    uint32_t seat_version;
+    uint32_t dmabuf_version;
+
+    /// CrownOS bundle: Android draws on one fixed atlas of this many pixels
+    /// (persist.waydroid.width/height) and no host configure ever resizes it.
+    bool fixed_atlas;
+    int atlas_width;
+    int atlas_height;
+
+    std::unique_ptr<fence::frame_sync> sync;
+
+    std::unique_ptr<agent_bridge> bridge;
+    /// Never null; send() fails while no agent is connected.
+    std::unique_ptr<agent::link> agent_link;
+    /// What the agent said about each task; guarded by windowsMutex.
+    task::registry tasks;
+    /// The task whose window has keyboard focus, 0 for none.
+    std::atomic<uint32_t> focused_task;
 
     int system_version;
     GrallocType gtype;
@@ -335,12 +397,12 @@ struct display {
     int input_fd[INPUT_TOTAL];
     int ptrPrvX;
     int ptrPrvY;
-    double wheelAccumulatorX;
-    double wheelAccumulatorY;
-    bool wheelEvtIsDiscrete;
+    input::scroll_frame scroll;
     bool reverseScroll;
     int touch_id[MAX_TOUCHPOINTS];
-    std::map<struct wl_surface *, struct layerFrame> layers;
+    /// Surface-local to Android display coordinates, for every surface that
+    /// can receive input.
+    input::surface_input_map input_map;
 
     open_windows windows;
     std::set<std::string> ignored_apps;
@@ -370,9 +432,11 @@ struct display {
     int req_height;
     int refresh;
 
-    std::unordered_set<uint32_t> formats;
+    /// (format, modifier) pairs the compositor imports for any surface:
+    /// linux-dmabuf v4 default feedback, or v3 modifier events.
+    std::shared_ptr<const dmabuf::format_set> importable_formats() const;
+    void set_importable_formats(dmabuf::format_set formats);
 
-    std::map<uint32_t, std::vector<uint64_t>> modifiers;
     std::map<uint32_t, std::string> layer_names;
     std::map<uint32_t, struct handleExt> layer_handles_ext;
     struct handleExt target_layer_handle_ext;
@@ -388,6 +452,13 @@ struct display {
 
     const hwc_procs_t *procs;
     bool needHotplug;
+
+    /// Asks SurfaceFlinger for a new frame.
+    void request_frame() const;
+
+  private:
+    mutable std::mutex formats_mutex;
+    std::shared_ptr<const dmabuf::format_set> formats;
 };
 
 void
@@ -399,5 +470,8 @@ snapshot_inactive_app_window(struct display *display, struct window *window);
 
 struct display *
 create_display(const char* gralloc);
+/// Connects to crown-agent when a CrownOS bundle is installed.
+void
+start_task_windows(struct display *display);
 void
 destroy_display(struct display *display);

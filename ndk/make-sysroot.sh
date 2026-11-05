@@ -10,11 +10,11 @@
 set -euo pipefail
 
 ABI=${1:-x86_64}
-S2_CACHE=${S2_CACHE:-$HOME/.cache/crownos-android/s2}
+HWC_CACHE=${HWC_CACHE:-$HOME/.cache/crownos-android/hwc}
 IMAGES=${WAYDROID_IMAGES:-/var/lib/waydroid/images}
 NDK=${ANDROID_NDK:-$HOME/Android/Sdk/ndk/27.2.12479018}
 READELF=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
-SYSROOT=$S2_CACHE/sysroot/$ABI
+SYSROOT=$HWC_CACHE/sysroot/$ABI
 LIBDIR=lib64
 
 case $ABI in
@@ -61,7 +61,7 @@ locate_library() {
 
 rm -rf "$SYSROOT"
 mkdir -p "$SYSROOT/$LIBDIR"
-STOCK_HWC=$S2_CACHE/stock/$ABI/hwcomposer.waydroid.so
+STOCK_HWC=$HWC_CACHE/stock/$ABI/hwcomposer.waydroid.so
 mkdir -p "$(dirname "$STOCK_HWC")"
 [[ -f $STOCK_HWC ]] || debugfs_run "$VENDOR_IMG" "dump /$LIBDIR/hw/hwcomposer.waydroid.so $STOCK_HWC" > /dev/null
 declare -A ELF_MACHINE=([x86_64]=X86-64 [arm64]=AArch64)

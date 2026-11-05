@@ -10,8 +10,8 @@ set -euo pipefail
 HIDL_GEN=$1
 AIDL=$2
 OUT=$3
-S2_CACHE=${S2_CACHE:-$HOME/.cache/crownos-android/s2}
-AOSP_DIR=$S2_CACHE/aosp
+HWC_CACHE=${HWC_CACHE:-$HOME/.cache/crownos-android/hwc}
+AOSP_DIR=$HWC_CACHE/aosp
 FORK_DIR=$(cd "$(dirname "$0")/.." && pwd)
 INTERFACES=$AOSP_DIR/hardware_interfaces
 

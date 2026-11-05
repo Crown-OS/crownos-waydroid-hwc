@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 namespace input {
@@ -29,6 +30,35 @@ class scroll_axis {
   private:
     int32_t add(double value120);
     double pending120 = 0;
+};
+
+enum class scroll_axis_id { vertical = 0, horizontal = 1 };
+
+/// Collects one wl_pointer frame of axis events and turns it into detents
+/// per axis: axis_value120 (or axis_discrete) when the frame has it, the
+/// continuous axis value otherwise.
+class scroll_frame {
+  public:
+    void source_is_wheel(bool wheel);
+    void value120(scroll_axis_id axis, int32_t value);
+    void discrete(scroll_axis_id axis, int32_t steps);
+    void value(scroll_axis_id axis, double distance);
+    void stop(scroll_axis_id axis);
+    /// Ends the frame: detents to send for {vertical, horizontal}, in the
+    /// Wayland sense (positive scrolls down or right).
+    std::array<int32_t, 2> finish();
+
+  private:
+    struct axis_frame {
+        int32_t value120 = 0;
+        bool has_value120 = false;
+        double distance = 0;
+        bool stopped = false;
+    };
+
+    std::array<scroll_axis, 2> axes;
+    std::array<axis_frame, 2> frame;
+    bool wheel = false;
 };
 
 } // namespace input

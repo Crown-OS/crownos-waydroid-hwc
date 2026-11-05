@@ -113,6 +113,7 @@ placement place(const px_rect &frame, const px_rect &visible, const buffer_view 
 
     result.input.origin_x = visible.left;
     result.input.origin_y = visible.top;
+    result.input.bounds = visible;
     result.input.px_per_logical_x = double(visible.width()) / result.width;
     result.input.px_per_logical_y = double(visible.height()) / result.height;
     return result;
@@ -184,6 +185,7 @@ input_mapping slot_input_mapping(const px_rect &slot, const window_scale &scale)
     input_mapping mapping;
     mapping.origin_x = slot.left;
     mapping.origin_y = slot.top;
+    mapping.bounds = slot;
     mapping.px_per_logical_x = scale.x > 0 ? 1 / scale.x : 1;
     mapping.px_per_logical_y = scale.y > 0 ? 1 / scale.y : 1;
     return mapping;

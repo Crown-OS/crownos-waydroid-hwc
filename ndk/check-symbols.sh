@@ -8,7 +8,7 @@ set -euo pipefail
 
 BUILT=$1
 SYSROOT=$2
-STOCK=${3:-${S2_CACHE:-$HOME/.cache/crownos-android/s2}/stock/$(basename "$SYSROOT")/hwcomposer.waydroid.so}
+STOCK=${3:-${HWC_CACHE:-$HOME/.cache/crownos-android/hwc}/stock/$(basename "$SYSROOT")/hwcomposer.waydroid.so}
 TOOLS=$(cd "$(dirname "$0")/tools" && pwd)
 
 stock_args=()

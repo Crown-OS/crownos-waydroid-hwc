@@ -43,14 +43,19 @@ void feedback_collector::set_table(const uint8_t *bytes, size_t size) {
 
 void feedback_collector::add_tranche_indices(const uint16_t *indices, size_t count) {
     for (size_t i = 0; i < count; ++i) {
-        if (indices[i] < table.size()) {
-            collected.add(table[indices[i]].format, table[indices[i]].modifier);
+        if (indices[i] >= table.size()) {
+            continue;
+        }
+        const format_modifier &pair = table[indices[i]];
+        if (!collected.formats.contains(pair.format, pair.modifier)) {
+            collected.formats.add(pair.format, pair.modifier);
+            collected.preference.push_back(pair);
         }
     }
 }
 
-format_set feedback_collector::done() {
-    format_set result = std::move(collected);
+feedback feedback_collector::done() {
+    feedback result = std::move(collected);
     collected = {};
     return result;
 }

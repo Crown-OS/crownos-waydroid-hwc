@@ -6,20 +6,23 @@
 #   4. generate the HIDL/AIDL headers
 #   5. cross-compile with the NDK (HWC plus the vendor.waydroid.* HIDL libraries)
 #   6. check imports (H2), HIDL ABI against vendor.img, gralloc handle layout (H3)
+# The host unit tests (host-test.sh) run first.
 #
 # usage: build.sh [x86_64|arm64]
-# env:   ANDROID_NDK, S2_CACHE, WAYDROID_IMAGES (images of the same ABI),
-#        JOBS (default 4), AIDL, HOST_CC, HOST_CXX
+# env:   ANDROID_NDK, HWC_CACHE, WAYDROID_IMAGES (images of the same ABI),
+#        JOBS (default 4), AIDL, HOST_CC, HOST_CXX, CROWNOS_PROTOCOLS
+#        (crownos-protocols/protocols), CROWNOS_CONTRACTS (crownos-android/contracts)
 set -euo pipefail
 
 ABI=${1:-x86_64}
 NDK_DIR=$(cd "$(dirname "$0")" && pwd)
-S2_CACHE=${S2_CACHE:-$HOME/.cache/crownos-android/s2}
+HWC_CACHE=${HWC_CACHE:-$HOME/.cache/crownos-android/hwc}
 ANDROID_NDK=${ANDROID_NDK:-$HOME/Android/Sdk/ndk/27.2.12479018}
 AIDL=${AIDL:-$HOME/Android/Sdk/build-tools/34.0.0/aidl}
 JOBS=${JOBS:-4}
 API_LEVEL=33
-export S2_CACHE ANDROID_NDK
+CROWNOS_PROTOCOLS=${CROWNOS_PROTOCOLS:-$NDK_DIR/../../crownos-protocols/protocols}
+export HWC_CACHE ANDROID_NDK JOBS
 
 case $ABI in
     x86_64) ANDROID_ABI=x86_64 ;;
@@ -27,16 +30,17 @@ case $ABI in
     *) echo "unsupported ABI: $ABI" >&2; exit 1 ;;
 esac
 
-HOST_BUILD=$S2_CACHE/build/host
-TARGET_BUILD=$S2_CACHE/build/$ABI
-OUTPUT=$S2_CACHE/out/$ABI
+HOST_BUILD=$HWC_CACHE/build/host
+TARGET_BUILD=$HWC_CACHE/build/$ABI
+OUTPUT=$HWC_CACHE/out/$ABI
 
+"$NDK_DIR/host-test.sh"
 "$NDK_DIR/fetch-sources.sh"
 "$NDK_DIR/make-sysroot.sh" "$ABI"
 
 cmake -G Ninja -S "$NDK_DIR/host" -B "$HOST_BUILD" \
     -DCMAKE_C_COMPILER="${HOST_CC:-clang}" -DCMAKE_CXX_COMPILER="${HOST_CXX:-clang++}" \
-    -DCMAKE_BUILD_TYPE=Release -DAOSP_DIR="$S2_CACHE/aosp"
+    -DCMAKE_BUILD_TYPE=Release -DAOSP_DIR="$HWC_CACHE/aosp"
 cmake --build "$HOST_BUILD" -j "$JOBS"
 
 "$NDK_DIR/generate-interfaces.sh" "$HOST_BUILD/hidl-gen" "$AIDL" "$TARGET_BUILD/gen-interfaces"
@@ -47,16 +51,17 @@ cmake -G Ninja -S "$NDK_DIR" -B "$TARGET_BUILD" \
     -DANDROID_PLATFORM="android-$API_LEVEL" \
     -DANDROID_STL=none \
     -DCMAKE_BUILD_TYPE=Release \
-    -DAOSP_DIR="$S2_CACHE/aosp" \
-    -DSYSROOT_DIR="$S2_CACHE/sysroot/$ABI" \
+    -DAOSP_DIR="$HWC_CACHE/aosp" \
+    -DSYSROOT_DIR="$HWC_CACHE/sysroot/$ABI" \
     -DGENERATED_DIR="$TARGET_BUILD/gen-interfaces" \
     -DWAYLAND_SCANNER="$HOST_BUILD/wayland-scanner" \
+    -DCROWNOS_PROTOCOLS_DIR="$CROWNOS_PROTOCOLS" \
     -DCMAKE_INSTALL_PREFIX="$OUTPUT"
 cmake --build "$TARGET_BUILD" -j "$JOBS"
 cmake --install "$TARGET_BUILD" --strip
 
-"$NDK_DIR/check-symbols.sh" "$OUTPUT/vendor/lib64/hw/hwcomposer.waydroid.so" "$S2_CACHE/sysroot/$ABI"
-"$NDK_DIR/check-hidl-abi.sh" "$TARGET_BUILD" "$S2_CACHE/sysroot/$ABI"
+"$NDK_DIR/check-symbols.sh" "$OUTPUT/vendor/lib64/hw/hwcomposer.waydroid.so" "$HWC_CACHE/sysroot/$ABI"
+"$NDK_DIR/check-hidl-abi.sh" "$TARGET_BUILD" "$HWC_CACHE/sysroot/$ABI"
 if [[ $ABI == x86_64 ]]; then
     "$NDK_DIR/check-gralloc-handle.sh" "$TARGET_BUILD/hwcomposer.waydroid.so"
 fi
