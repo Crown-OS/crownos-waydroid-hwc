@@ -66,9 +66,10 @@ void damage_buffer(const hwc_layer_1 &layer, wl_surface *surface) {
     }
 }
 
-void set_accepts_input(struct display *display, window::layer &layer, bool accepts_input) {
+/// Returns whether the input region changed, which the next commit applies.
+bool set_accepts_input(struct display *display, window::layer &layer, bool accepts_input) {
     if (layer.accepts_input == accepts_input) {
-        return;
+        return false;
     }
     wl_region *nothing = accepts_input ? nullptr : wl_compositor_create_region(display->compositor);
     wl_surface_set_input_region(layer.surface, nothing);
@@ -76,6 +77,7 @@ void set_accepts_input(struct display *display, window::layer &layer, bool accep
         wl_region_destroy(nothing);
     }
     layer.accepts_input = accepts_input;
+    return true;
 }
 
 struct timed_frame {
@@ -222,8 +224,7 @@ int task_window_mode::show_layer(waydroid_hwc_composer_device_1 *pdev, window &w
                                  size_t index, const task::placement &placement, bool accepts_input) {
     struct display *display = pdev->display;
     window::layer &layer = window.get_next_layer();
-    window.task->dirty = true;
-    set_accepts_input(display, layer, accepts_input);
+    const bool input_changed = set_accepts_input(display, layer, accepts_input);
     if (accepts_input) {
         display->input_map.set(layer.surface, placement.input);
     } else {
@@ -231,8 +232,8 @@ int task_window_mode::show_layer(waydroid_hwc_composer_device_1 *pdev, window &w
     }
 
     const buffer *cached = cached_layer_buffer(pdev, hwc_layer, index);
-    if (cached && cached->id == layer.shown_buffer && same_placement(layer.shown_placement, placement) &&
-        content_unchanged(*hwc_layer)) {
+    if (!input_changed && cached && cached->id == layer.shown_buffer &&
+        same_placement(layer.shown_placement, placement) && content_unchanged(*hwc_layer)) {
         close_fence(hwc_layer->acquireFenceFd);
         hwc_layer->releaseFenceFd =
             layer.sync && display->sync && cached->isDmabuf ? display->sync->release_fence(*layer.sync) : -1;
@@ -247,6 +248,7 @@ int task_window_mode::show_layer(waydroid_hwc_composer_device_1 *pdev, window &w
         close_fence(hwc_layer->acquireFenceFd);
         return -1;
     }
+    window.task->dirty = true;
     wl_surface_attach(layer.surface, buf->wl_buffer, 0, 0);
     damage_buffer(*hwc_layer, layer.surface);
     wl_surface_set_buffer_transform(layer.surface, static_cast<int32_t>(hwc_transform_to_buffer_transform(hwc_layer->transform)));
@@ -347,6 +349,7 @@ int task_window_mode::post_processing(waydroid_hwc_composer_device_1 *pdev, hwc_
             wl_surface_commit(unused.surface);
             unused.shown_buffer = 0;
             display->input_map.erase(unused.surface);
+            task->dirty = true;
         }
         task->layers_last_frame = window->lastLayer;
     }
@@ -374,7 +377,8 @@ void task_window_mode::commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_
     struct display *display = pdev->display;
     auto needs_commit = [](const window &window) {
         const task_window_state &task = *window.task;
-        return task.ready(window) && (!task.mapped || task.dirty || task.sizing.size() != task.shown_size);
+        // A window maps with its first layers, never as an empty frame
+        return task.ready(window) && (task.dirty || (task.mapped && task.sizing.size() != task.shown_size));
     };
 
     window *timed = focused_window(pdev);
@@ -390,10 +394,14 @@ void task_window_mode::commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_
 
     frame_timed = false;
     for (auto &[key, window] : display->windows) {
-        if (!window->task || !needs_commit(*window)) {
+        if (!window->task || !window->task->ready(*window)) {
             continue;
         }
         task_window_state &task = *window->task;
+        display->input_map.set(window->surface, task::slot_input_mapping(task.sizing.slot(), task.sizing.layer_scale()));
+        if (!needs_commit(*window)) {
+            continue;
+        }
         const task::logical_size size = task.sizing.size();
         const bool first_map = !task.mapped;
         if (first_map) {
@@ -407,7 +415,6 @@ void task_window_mode::commit_windows(waydroid_hwc_composer_device_1 *pdev, hwc_
             wp_viewport_set_destination(window->viewport, size.width, size.height);
             task.shown_size = size;
         }
-        display->input_map.set(window->surface, task::slot_input_mapping(task.sizing.slot(), task.sizing.layer_scale()));
         if (window.get() == timed && display->presentation && display->sync) {
             struct wp_presentation_feedback *feedback = wp_presentation_feedback(display->presentation, window->surface);
             wp_presentation_feedback_add_listener(feedback, &frame_feedback_listener, new timed_frame{pdev, pdev->frame});
